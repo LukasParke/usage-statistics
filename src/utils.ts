@@ -1,8 +1,6 @@
 import * as core from '@actions/core';
 import { CategoryScale, Chart, LinearScale, LineController, LineElement, PointElement, BarController, BarElement } from 'chart.js';
 import { readFile, writeFile } from 'fs/promises';
-import { writeFileSync } from 'node:fs';
-import { Canvas } from 'skia-canvas';
 import type { MetricResult } from "./collectors/types.js";
 import { addRepoDetails, formatGitHubSummary } from './summaries/github.js';
 import { addNpmDetails, formatNpmSummary } from './summaries/npm.js';
