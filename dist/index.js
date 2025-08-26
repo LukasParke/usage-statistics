@@ -42642,7 +42642,7 @@ try {
             case 'GitHub':
                 console.log(`Collecting GitHub metrics for ${githubRepositories.join(', ')}`);
                 console.time(`Collecting GitHub metrics`);
-                metricPromises.push((0,_collectors_github_js__WEBPACK_IMPORTED_MODULE_2__/* .collectGithubBatch */ .W)(githubRepositories).then(results => {
+                metricPromises.push((0,_collectors_github_js__WEBPACK_IMPORTED_MODULE_2__/* .collectGithubBatch */ .WH)(githubRepositories).then(results => {
                     console.timeEnd(`Collecting GitHub metrics`);
                     return results;
                 }));
@@ -42702,10 +42702,10 @@ __webpack_async_result__();
 
 // EXPORTS
 __nccwpck_require__.d(__webpack_exports__, {
-  W: () => (/* binding */ collectGithubBatch)
+  WH: () => (/* binding */ collectGithubBatch)
 });
 
-// UNUSED EXPORTS: collectGithub
+// UNUSED EXPORTS: collectGithub, parseReleaseAsset
 
 ;// CONCATENATED MODULE: ./node_modules/@octokit/rest/node_modules/@octokit/core/node_modules/universal-user-agent/index.js
 function getUserAgent() {
@@ -46498,6 +46498,116 @@ var core = __nccwpck_require__(7484);
 const PlatformSettings = {
     name: 'GitHub',
 };
+const OS_MAP = {
+    linux: 'linux',
+    darwin: 'macos',
+    mac: 'macos',
+    macos: 'macos',
+    windows: 'windows',
+    win: 'windows',
+    freebsd: 'freebsd',
+};
+const ARCHES = ['amd64', 'x64', 'arm64', 'armv6', '386', 'i386'];
+const FORMATS = ['zip', 'tar.gz', 'tar.bz2', 'tar.xz', 'deb', 'rpm', 'msi', 'exe', 'txt', 'yaml', 'yml', 'json'];
+const VARIANTS = ['docs', 'installer'];
+function parseReleaseAsset(filename) {
+    const original = filename;
+    let project = '';
+    let os = '';
+    let arch = '';
+    let format = '';
+    let variant = '';
+    let version = '';
+    // Extract format (extension)
+    const extRegex = new RegExp(`\\.(${FORMATS.join('|')})$`, 'i');
+    const extMatch = filename.match(extRegex);
+    format = extMatch ? extMatch[1].toLowerCase() : '';
+    // Remove extension and normalize separators
+    const nameWithoutExt = filename.replace(extRegex, '').replace(/[_-]/g, '.');
+    const parts = nameWithoutExt.split('.');
+    // API / special variants detection
+    const apiIndex = parts.findIndex(p => p.toLowerCase() === 'api' || p.toLowerCase() === 'nerm' || p.toLowerCase() === 'beta');
+    if (apiIndex >= 0) {
+        project = parts.slice(0, apiIndex).join('.');
+        let varMatch = parts.slice(apiIndex).join(' ');
+        // Recognize versions for API specs: nerm, nerm v2025, v3, v2024, v2025, beta
+        const nermMatch = varMatch.match(/nerm(?:\s+v\d{4})?/i);
+        const vDigitMatch = varMatch.match(/v\d{1,4}\b/i);
+        const betaMatch = varMatch.match(/\bbeta\b/i);
+        const semverMatch = varMatch.match(/\d+\.\d+(?:\.\d+)?/);
+        if (nermMatch) {
+            version = nermMatch[0];
+        }
+        else if (vDigitMatch) {
+            version = vDigitMatch[0];
+        }
+        else if (betaMatch) {
+            version = 'beta';
+        }
+        else if (semverMatch) {
+            version = semverMatch[0];
+        }
+        // Do not set OS to 'api' – leave blank for API specs
+        os = '';
+        arch = '';
+        return { project, os, arch, format, variant, version, original };
+    }
+    // Version detection
+    for (const part of parts) {
+        const semverMatch = part.match(/^v?(\d+\.\d+(\.\d+)?)$/);
+        if (semverMatch) {
+            version = semverMatch[1];
+            break;
+        }
+    }
+    // OS detection
+    for (const part of parts) {
+        const lower = part.toLowerCase();
+        if (OS_MAP[lower])
+            os = OS_MAP[lower];
+    }
+    // Arch detection
+    for (const part of parts) {
+        const lower = part.toLowerCase();
+        if (ARCHES.includes(lower))
+            arch = lower === 'x64' ? 'amd64' : lower;
+    }
+    // Variant detection
+    for (const part of parts) {
+        const lower = part.toLowerCase();
+        if (VARIANTS.includes(lower))
+            variant = lower;
+    }
+    // Project is first part if not already set
+    if (!project)
+        project = parts[0];
+    return { project, os, arch, format, variant, version, original };
+}
+// Build a grouping key from parsed asset parts, excluding version and
+// collapsing YAML/JSON specs to the same group by omitting the format.
+function buildParsedAssetKey(parsed) {
+    const parts = [];
+    const project = parsed.project?.toLowerCase().trim();
+    const os = parsed.os?.toLowerCase().trim();
+    const arch = parsed.arch?.toLowerCase().trim();
+    let variant = (parsed.variant || '').toLowerCase();
+    if (parsed.version) {
+        variant = variant.replace(parsed.version.toLowerCase(), '').replace(/[._-]+$/g, '').trim();
+    }
+    if (project)
+        parts.push(project);
+    if (os)
+        parts.push(os);
+    if (arch)
+        parts.push(arch);
+    if (variant)
+        parts.push(variant);
+    const fmt = (parsed.format || '').toLowerCase();
+    if (fmt && fmt !== 'yaml' && fmt !== 'yml' && fmt !== 'json') {
+        parts.push(fmt);
+    }
+    return parts.join('_');
+}
 // GraphQL query for basic repository data (without releases)
 const REPOSITORY_BASIC_QUERY = `
   query RepositoryBasicData($owner: String!, $name: String!) {
@@ -46586,11 +46696,8 @@ async function collectGithub(repository) {
         let graphqlData = null;
         try {
             const graphqlClient = dist_node.graphql.defaults({
-                headers: {
-                    authorization: token ? `token ${token}` : undefined,
-                },
+                headers: { authorization: token ? `token ${token}` : undefined },
             });
-            // Fetch basic repository data (without releases)
             const basicResponse = await graphqlClient(REPOSITORY_BASIC_QUERY, {
                 owner,
                 name: repo
@@ -46602,19 +46709,33 @@ async function collectGithub(repository) {
         catch (error) {
             console.warn(`Could not fetch GitHub GraphQL basic data for ${repository}:`, error);
         }
-        // Step 2: Fetch releases data separately using GraphQL
+        // Step 2: Fetch releases data
         let totalReleaseDownloads = 0;
         let latestReleaseDownloads = 0;
         let releaseCount = 0;
         let downloadRange = [];
         let latestRelease = null;
+        let assetTotalsByName = {};
+        let assetReleaseSeries = {};
+        let assetAttributesByKey = {};
+        // Additional breakdowns derived from parsed assets
+        let assetTotalsByParsedKey = {};
+        let totalsByOs = {};
+        let totalsByArch = {};
+        let totalsByFormat = {};
+        let totalsByVariant = {};
+        // Per-dimension per-release series for accurate trend charts
+        let attributeReleaseSeries = {
+            os: {},
+            arch: {},
+            format: {},
+            variant: {},
+            version: {},
+        };
         try {
             const graphqlClient = dist_node.graphql.defaults({
-                headers: {
-                    authorization: token ? `token ${token}` : undefined,
-                },
+                headers: { authorization: token ? `token ${token}` : undefined },
             });
-            // Fetch releases data
             const releasesResponse = await graphqlClient(RELEASES_QUERY, {
                 owner,
                 name: repo,
@@ -46629,16 +46750,81 @@ async function collectGithub(repository) {
                         for (const asset of release.releaseAssets.nodes) {
                             if (asset) {
                                 releaseDownloads += asset.downloadCount || 0;
+                                const rawAssetName = asset.name;
+                                const parsed = parseReleaseAsset(rawAssetName);
+                                const parsedKey = buildParsedAssetKey(parsed);
+                                const assetKey = parsedKey || rawAssetName.toLowerCase();
+                                const assetDownloads = asset.downloadCount || 0;
+                                // Skip checksum assets entirely
+                                if (parsed.variant && parsed.variant.toLowerCase().includes('checksum')) {
+                                    continue;
+                                }
+                                assetTotalsByName[assetKey] = (assetTotalsByName[assetKey] || 0) + assetDownloads;
+                                assetTotalsByParsedKey[parsedKey] = (assetTotalsByParsedKey[parsedKey] || 0) + assetDownloads;
+                                // Persist attribute mapping for charting by dimensions
+                                if (!assetAttributesByKey[assetKey]) {
+                                    assetAttributesByKey[assetKey] = {
+                                        project: parsed.project || undefined,
+                                        os: parsed.os || undefined,
+                                        arch: parsed.arch || undefined,
+                                        format: parsed.format || undefined,
+                                        variant: parsed.variant || undefined,
+                                        version: parsed.version || undefined,
+                                    };
+                                }
+                                if (parsed.os)
+                                    totalsByOs[parsed.os] = (totalsByOs[parsed.os] || 0) + assetDownloads;
+                                if (parsed.arch)
+                                    totalsByArch[parsed.arch] = (totalsByArch[parsed.arch] || 0) + assetDownloads;
+                                if (parsed.format)
+                                    totalsByFormat[parsed.format] = (totalsByFormat[parsed.format] || 0) + assetDownloads;
+                                if (parsed.variant)
+                                    totalsByVariant[parsed.variant] = (totalsByVariant[parsed.variant] || 0) + assetDownloads;
+                                // Build per-dimension series over releases
+                                const tag = release.tagName;
+                                if (parsed.os) {
+                                    if (!attributeReleaseSeries.os[parsed.os])
+                                        attributeReleaseSeries.os[parsed.os] = {};
+                                    attributeReleaseSeries.os[parsed.os][tag] = (attributeReleaseSeries.os[parsed.os][tag] || 0) + assetDownloads;
+                                }
+                                if (parsed.arch) {
+                                    if (!attributeReleaseSeries.arch[parsed.arch])
+                                        attributeReleaseSeries.arch[parsed.arch] = {};
+                                    attributeReleaseSeries.arch[parsed.arch][tag] = (attributeReleaseSeries.arch[parsed.arch][tag] || 0) + assetDownloads;
+                                }
+                                if (parsed.format) {
+                                    if (!attributeReleaseSeries.format[parsed.format])
+                                        attributeReleaseSeries.format[parsed.format] = {};
+                                    attributeReleaseSeries.format[parsed.format][tag] = (attributeReleaseSeries.format[parsed.format][tag] || 0) + assetDownloads;
+                                }
+                                if (parsed.variant) {
+                                    if (!attributeReleaseSeries.variant[parsed.variant])
+                                        attributeReleaseSeries.variant[parsed.variant] = {};
+                                    attributeReleaseSeries.variant[parsed.variant][tag] = (attributeReleaseSeries.variant[parsed.variant][tag] || 0) + assetDownloads;
+                                }
+                                if (parsed.version) {
+                                    const versionKey = parsed.version.toLowerCase();
+                                    if (!attributeReleaseSeries.version[versionKey])
+                                        attributeReleaseSeries.version[versionKey] = {};
+                                    attributeReleaseSeries.version[versionKey][tag] = (attributeReleaseSeries.version[versionKey][tag] || 0) + assetDownloads;
+                                }
+                                const day = release?.publishedAt || release?.createdAt;
+                                if (!assetReleaseSeries[assetKey]) {
+                                    assetReleaseSeries[assetKey] = [];
+                                }
+                                assetReleaseSeries[assetKey].push({
+                                    tagName: release.tagName,
+                                    day: day || '',
+                                    downloads: assetDownloads,
+                                });
                             }
                         }
                     }
                     totalReleaseDownloads += releaseDownloads;
-                    // Latest release is the first one in the list
                     if (release && release === releases[0]) {
                         latestReleaseDownloads = releaseDownloads;
                         latestRelease = release.tagName;
                     }
-                    // Add to download range with proper date format for charts
                     if (release?.publishedAt) {
                         downloadRange.push({
                             day: release.publishedAt,
@@ -46652,43 +46838,30 @@ async function collectGithub(repository) {
         catch (error) {
             console.warn(`Could not fetch GitHub GraphQL releases data for ${repository}:`, error);
         }
-        // Fallback to REST API if GraphQL fails or for additional data
+        // Fallback REST API call
         let restData = null;
         try {
-            const { data: repoData } = await octokit.repos.get({
-                owner,
-                repo
-            });
+            const { data: repoData } = await octokit.repos.get({ owner, repo });
             restData = repoData;
         }
         catch (error) {
             console.warn(`Could not fetch GitHub REST data for ${repository}:`, error);
         }
-        // Use the best available data (GraphQL preferred, REST as fallback)
         const finalData = graphqlData || restData;
-        if (!finalData) {
+        if (!finalData)
             throw new Error('Could not fetch repository data from either GraphQL or REST API');
-        }
-        // Get traffic statistics using REST API (requires authentication)
+        // Repo traffic stats
         let viewsCount = 0;
         let uniqueVisitors = 0;
         let clonesCount = 0;
         if (token) {
             try {
-                // Get views data
-                const { data: viewsData } = await octokit.repos.getViews({
-                    owner,
-                    repo
-                });
+                const { data: viewsData } = await octokit.repos.getViews({ owner, repo });
                 if (viewsData) {
                     viewsCount = viewsData.count || 0;
                     uniqueVisitors = viewsData.uniques || 0;
                 }
-                // Get clones data
-                const { data: clonesData } = await octokit.repos.getClones({
-                    owner,
-                    repo
-                });
+                const { data: clonesData } = await octokit.repos.getClones({ owner, repo });
                 if (clonesData) {
                     clonesCount = clonesData.count || 0;
                 }
@@ -46697,19 +46870,18 @@ async function collectGithub(repository) {
                 console.warn(`Could not fetch GitHub traffic data for ${repository}:`, error);
             }
         }
-        // Calculate repository age
+        // Repository age and last activity
         let repositoryAge = 0;
         if (finalData.createdAt) {
             const created = new Date(finalData.createdAt);
             const now = new Date();
-            repositoryAge = Math.floor((now.getTime() - created.getTime()) / (1000 * 60 * 60 * 24)); // days
+            repositoryAge = Math.floor((now.getTime() - created.getTime()) / (1000 * 60 * 60 * 24));
         }
-        // Calculate activity metrics
         let lastActivity = 0;
         if (finalData.pushedAt) {
             const pushed = new Date(finalData.pushedAt);
             const now = new Date();
-            lastActivity = Math.floor((now.getTime() - pushed.getTime()) / (1000 * 60 * 60 * 24)); // days
+            lastActivity = Math.floor((now.getTime() - pushed.getTime()) / (1000 * 60 * 60 * 24));
         }
         return {
             platform: PlatformSettings.name,
@@ -46738,6 +46910,15 @@ async function collectGithub(repository) {
                 defaultBranch: finalData.defaultBranchRef?.name || finalData.default_branch || null,
                 downloadsTotal: totalReleaseDownloads || 0,
                 downloadRange,
+                assetTotalsByName,
+                assetReleaseSeries,
+                assetTotalsByParsedKey,
+                totalsByOs,
+                totalsByArch,
+                totalsByFormat,
+                totalsByVariant,
+                attributeReleaseSeries,
+                assetAttributesByKey,
             }
         };
     }
@@ -58166,7 +58347,7 @@ function moveNumericKeys(obj, start, move) {
     }
     return e;
 }
-class Chart {
+class chart_Chart {
     static defaults = defaults;
     static instances = instances;
     static overrides = overrides;
@@ -58987,7 +59168,7 @@ class Chart {
     }
 }
 function invalidatePlugins() {
-    return each(Chart.instances, (chart)=>chart._plugins.invalidate());
+    return each(chart_Chart.instances, (chart)=>chart._plugins.invalidate());
 }
 
 function clipSelf(ctx, element, endAngle) {
@@ -64148,7 +64329,7 @@ var lib = __nccwpck_require__(4711);
 
 
 const {
-  Canvas, CanvasGradient, CanvasPattern, CanvasTexture,
+  Canvas: lib_Canvas, CanvasGradient, CanvasPattern, CanvasTexture,
   Image, ImageData, loadImage, loadImageData,
   Path2D: lib_Path2D, DOMPoint, DOMMatrix, DOMRect,
   FontLibrary, TextMetrics,
@@ -64166,28 +64347,33 @@ var semver = __nccwpck_require__(2088);
 
 
 // Register all Chart.js controllers
-Chart.register(...registerables);
+chart_Chart.register(...registerables);
 /**
  * Safely compare two version strings using semver
  * Falls back to string comparison if semver parsing fails
  */
 function safeSemverCompare(a, b) {
     try {
-        // Clean and validate versions
         const cleanA = a.trim();
         const cleanB = b.trim();
-        // Check if versions are valid semver
         if (!semver.valid(cleanA) || !semver.valid(cleanB)) {
-            // Fall back to string comparison for invalid semver
             return cleanA.localeCompare(cleanB);
         }
         return semver.compare(cleanA, cleanB);
     }
-    catch (error) {
-        console.warn(`Semver comparison failed for "${a}" vs "${b}":`, error);
-        // Fall back to string comparison
+    catch {
         return a.trim().localeCompare(b.trim());
     }
+}
+/**
+ * Prettify a normalized asset key for charts/summaries
+ * Example: "sail|linux|amd64|yaml" -> "Sail / Linux / Amd64 / Yaml"
+ */
+function formatAssetLabel(key) {
+    return key
+        .split("|")
+        .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(" / ");
 }
 function formatGitHubSummary(summary, platformMetrics) {
     let totalStars = 0;
@@ -64237,6 +64423,48 @@ async function addRepoDetails(summary, metrics) {
         summary += `- Views: ${metric.metrics?.viewsCount?.toLocaleString() || 0}\n`;
         summary += `- Unique Visitors: ${metric.metrics?.uniqueVisitors?.toLocaleString() || 0}\n`;
         summary += `- Clones: ${metric.metrics?.clonesCount?.toLocaleString() || 0}\n`;
+        // Include top assets using parsed grouping keys for better aggregation
+        const assetTotalsByParsedKey = metric.metrics?.assetTotalsByParsedKey;
+        if (assetTotalsByParsedKey && Object.keys(assetTotalsByParsedKey).length > 0) {
+            const topAssets = Object.entries(assetTotalsByParsedKey)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 5);
+            if (topAssets.length > 0) {
+                summary += `- Top Assets (by downloads):\n`;
+                for (const [assetName, count] of topAssets) {
+                    summary += `  - ${assetName}: ${count.toLocaleString()}\n`;
+                }
+            }
+        }
+        // OS/Arch/Format/Variant breakdowns
+        const totalsByOs = metric.metrics?.totalsByOs;
+        const totalsByArch = metric.metrics?.totalsByArch;
+        const totalsByFormat = metric.metrics?.totalsByFormat;
+        const totalsByVariant = metric.metrics?.totalsByVariant;
+        if (totalsByOs && Object.keys(totalsByOs).length > 0) {
+            const ordered = Object.entries(totalsByOs).sort((a, b) => b[1] - a[1]).slice(0, 5);
+            summary += `- OS Breakdown:\n`;
+            for (const [k, v] of ordered)
+                summary += `  - ${k}: ${v.toLocaleString()}\n`;
+        }
+        if (totalsByArch && Object.keys(totalsByArch).length > 0) {
+            const ordered = Object.entries(totalsByArch).sort((a, b) => b[1] - a[1]).slice(0, 5);
+            summary += `- Arch Breakdown:\n`;
+            for (const [k, v] of ordered)
+                summary += `  - ${k}: ${v.toLocaleString()}\n`;
+        }
+        if (totalsByFormat && Object.keys(totalsByFormat).length > 0) {
+            const ordered = Object.entries(totalsByFormat).sort((a, b) => b[1] - a[1]).slice(0, 5);
+            summary += `- Format Breakdown:\n`;
+            for (const [k, v] of ordered)
+                summary += `  - ${k}: ${v.toLocaleString()}\n`;
+        }
+        if (totalsByVariant && Object.keys(totalsByVariant).length > 0) {
+            const ordered = Object.entries(totalsByVariant).sort((a, b) => b[1] - a[1]).slice(0, 5);
+            summary += `- Variant Breakdown:\n`;
+            for (const [k, v] of ordered)
+                summary += `  - ${k}: ${v.toLocaleString()}\n`;
+        }
         summary += `\n`;
     }
     summary += `\n\n`;
@@ -64257,31 +64485,29 @@ async function createGitHubReleaseChart(platformMetrics, outputPath) {
             svgOutputPathList.push(svgOutputPath);
             const svgOutputPathCumulative = await createCumulativeDownloadsChart(metric, outputPath);
             svgOutputPathList.push(svgOutputPathCumulative);
-            const svgOutputPathReleases = await createReleaseDownloadsChart(metric, outputPath);
-            svgOutputPathList.push(svgOutputPathReleases);
+            // Create trend charts by dimensions if parsed attributes exist
+            if (metric.metrics?.assetReleaseSeries && metric.metrics?.assetAttributesByKey) {
+                const trends = await createParsedAttributeTrendCharts(metric, outputPath);
+                svgOutputPathList.push(...trends);
+            }
         }
     }
     return svgOutputPathList;
 }
 function groupByReleaseCumulative(releaseRange) {
     const releases = {};
-    for (const release of releaseRange.sort((a, b) => {
-        return safeSemverCompare(a.tagName || '0.0.0', b.tagName || '0.0.0');
-    })) {
-        if (!release.tagName) {
+    for (const release of releaseRange.sort((a, b) => safeSemverCompare(a.tagName || '0.0.0', b.tagName || '0.0.0'))) {
+        if (!release.tagName)
             continue;
-        }
         if (!releases[release.tagName]) {
-            releases[release.tagName] = { downloads: release.downloads, tagName: release.tagName || '' };
+            releases[release.tagName] = { downloads: release.downloads, tagName: release.tagName };
         }
         else {
             releases[release.tagName].downloads += release.downloads;
         }
     }
     let cumulativeDownloads = 0;
-    for (const release of Object.keys(releases).sort((a, b) => {
-        return safeSemverCompare(a, b);
-    })) {
+    for (const release of Object.keys(releases).sort((a, b) => safeSemverCompare(a, b))) {
         cumulativeDownloads += releases[release].downloads;
         releases[release].downloads = cumulativeDownloads;
     }
@@ -64290,17 +64516,15 @@ function groupByReleaseCumulative(releaseRange) {
 async function createDownloadsPerReleaseChart(metric, outputPath) {
     const downloadsRange = metric.metrics?.downloadRange || [];
     const svgOutputPath = `${outputPath}/${metric.name.replace('/', '-')}-release-downloads.svg`;
-    const sortedReleases = downloadsRange.sort((a, b) => {
-        return safeSemverCompare(a.tagName || '0.0.0', b.tagName || '0.0.0');
-    });
-    const canvas = new Canvas(1000, 800);
-    const chart = new Chart(canvas, {
+    const sortedReleases = downloadsRange.sort((a, b) => safeSemverCompare(a.tagName || '0.0.0', b.tagName || '0.0.0'));
+    const canvas = new lib_Canvas(1000, 800);
+    const chart = new chart_Chart(canvas, {
         type: 'bar',
         data: {
-            labels: sortedReleases.map((release) => release.tagName),
+            labels: sortedReleases.map((r) => r.tagName),
             datasets: [{
                     label: `${metric.name} Release Downloads`,
-                    data: sortedReleases.map((release) => release.downloads),
+                    data: sortedReleases.map((r) => r.downloads),
                     backgroundColor: 'rgba(54, 162, 235, 0.8)',
                     borderColor: 'rgba(54, 162, 235, 1)',
                     borderWidth: 1,
@@ -64309,31 +64533,12 @@ async function createDownloadsPerReleaseChart(metric, outputPath) {
         options: {
             responsive: true,
             plugins: {
-                title: {
-                    display: true,
-                    text: `${metric.name} - Release Downloads`,
-                    font: {
-                        size: 16
-                    }
-                },
-                legend: {
-                    display: true
-                }
+                title: { display: true, text: `${metric.name} - Release Downloads`, font: { size: 16 } },
+                legend: { display: true }
             },
             scales: {
-                x: {
-                    title: {
-                        display: true,
-                        text: 'Release'
-                    }
-                },
-                y: {
-                    title: {
-                        display: true,
-                        text: 'Downloads'
-                    },
-                    beginAtZero: true
-                }
+                x: { title: { display: true, text: 'Release' } },
+                y: { title: { display: true, text: 'Downloads' }, beginAtZero: true }
             }
         }
     });
@@ -64346,18 +64551,15 @@ async function createCumulativeDownloadsChart(metric, outputPath) {
     const downloadsRange = metric.metrics?.downloadRange || [];
     const svgOutputPath = `${outputPath}/${metric.name.replace('/', '-')}-cumulative-release-downloads.svg`;
     const groupedDownloads = groupByReleaseCumulative(downloadsRange);
-    // Sort months chronologically
-    const semVerSortedReleases = Object.keys(groupedDownloads).sort((a, b) => {
-        return safeSemverCompare(a, b);
-    });
-    const canvas = new Canvas(1000, 800);
-    const chart = new Chart(canvas, {
+    const semVerSortedReleases = Object.keys(groupedDownloads).sort((a, b) => safeSemverCompare(a, b));
+    const canvas = new lib_Canvas(1000, 800);
+    const chart = new chart_Chart(canvas, {
         type: 'line',
         data: {
             labels: semVerSortedReleases,
             datasets: [{
                     label: `${metric.name} Cumulative Downloads`,
-                    data: semVerSortedReleases.map(release => groupedDownloads[release].downloads),
+                    data: semVerSortedReleases.map((release) => groupedDownloads[release].downloads),
                     backgroundColor: 'rgba(75, 192, 192, 0.2)',
                     borderColor: 'rgba(75, 192, 192, 1)',
                     borderWidth: 3,
@@ -64368,31 +64570,12 @@ async function createCumulativeDownloadsChart(metric, outputPath) {
         options: {
             responsive: true,
             plugins: {
-                title: {
-                    display: true,
-                    text: `${metric.name} - Cumulative Release Downloads`,
-                    font: {
-                        size: 16
-                    }
-                },
-                legend: {
-                    display: true
-                }
+                title: { display: true, text: `${metric.name} - Cumulative Release Downloads`, font: { size: 16 } },
+                legend: { display: true }
             },
             scales: {
-                x: {
-                    title: {
-                        display: true,
-                        text: 'Release'
-                    }
-                },
-                y: {
-                    title: {
-                        display: true,
-                        text: 'Downloads'
-                    },
-                    beginAtZero: true
-                }
+                x: { title: { display: true, text: 'Release' } },
+                y: { title: { display: true, text: 'Downloads' }, beginAtZero: true }
             }
         }
     });
@@ -64401,65 +64584,111 @@ async function createCumulativeDownloadsChart(metric, outputPath) {
     chart.destroy();
     return svgOutputPath;
 }
-async function createReleaseDownloadsChart(metric, outputPath) {
-    const downloadsRange = metric.metrics?.downloadRange || [];
-    const svgOutputPath = `${outputPath}/${metric.name.replace('/', '-')}-top-release-downloads.svg`;
-    // Sort releases by date (newest first for display)
-    const sortedReleases = downloadsRange
-        .filter((release) => release.tagName && release.downloads > 0)
-        .sort((a, b) => b.downloads - a.downloads)
-        .slice(0, 10) // Show top 10 releases
-        .sort((a, b) => safeSemverCompare(a.tagName || '0.0.0', b.tagName || '0.0.0'));
-    if (sortedReleases.length === 0) {
-        // Return empty chart if no releases
-        return svgOutputPath;
+async function createParsedAttributeTrendCharts(metric, outputPath) {
+    const outputPaths = [];
+    const attrSeries = metric.metrics?.attributeReleaseSeries || { os: {}, arch: {}, format: {}, variant: {}, version: {} };
+    const dims = ['os', 'arch', 'format', 'variant', 'version'];
+    for (const dim of dims) {
+        const groups = attrSeries[dim] || {};
+        const groupNames = Object.keys(groups);
+        if (groupNames.length === 0)
+            continue;
+        // Build union of release tags for this dim
+        const allReleaseTags = Array.from(new Set(groupNames.flatMap(name => Object.keys(groups[name]))))
+            .sort((a, b) => safeSemverCompare(a || '0.0.0', b || '0.0.0'));
+        const svgOutputPath = `${outputPath}/${metric.name.replace('/', '-')}-trend-${dim}.svg`;
+        const datasets = groupNames.map((name, idx) => {
+            const colorHue = (idx * 53) % 360;
+            const borderColor = `hsl(${colorHue}, 70%, 45%)`;
+            const backgroundColor = `hsla(${colorHue}, 70%, 45%, 0.2)`;
+            const byTag = groups[name];
+            return {
+                label: name,
+                data: allReleaseTags.map(tag => byTag[tag] || 0),
+                borderColor,
+                backgroundColor,
+                borderWidth: 2,
+                fill: false,
+                tension: 0.1
+            };
+        });
+        const canvas = new lib_Canvas(1200, 800);
+        const chart = new chart_Chart(canvas, {
+            type: 'line',
+            data: { labels: allReleaseTags, datasets },
+            options: {
+                responsive: true,
+                plugins: {
+                    title: { display: true, text: `${metric.name} - ${dim.toUpperCase()} Download Trends`, font: { size: 16 } },
+                    legend: { display: true }
+                },
+                scales: {
+                    x: { title: { display: true, text: 'Release Tag' } },
+                    y: {
+                        title: { display: true, text: 'Downloads' },
+                        beginAtZero: true,
+                        ticks: { precision: 0 },
+                        suggestedMin: 0,
+                        suggestedMax: Math.max(10, ...datasets.map((ds) => Math.max(...ds.data)))
+                    }
+                }
+            }
+        });
+        const svgBuffer = await canvas.toBuffer('svg', { matte: 'white' });
+        (0,external_fs_.writeFileSync)(svgOutputPath, svgBuffer);
+        chart.destroy();
+        outputPaths.push(svgOutputPath);
     }
+    return outputPaths;
+}
+async function createAssetDownloadsAcrossReleasesChart(metric, outputPath) {
+    const assetSeries = metric.metrics?.assetReleaseSeries || {};
+    const svgOutputPath = `${outputPath}/${metric.name.replace('/', '-')}-asset-downloads-over-releases.svg`;
+    const assetNames = Object.keys(assetSeries);
+    if (assetNames.length === 0)
+        return svgOutputPath;
+    const allReleaseTagsSet = new Set();
+    for (const name of assetNames) {
+        for (const point of assetSeries[name]) {
+            allReleaseTagsSet.add(point.tagName);
+        }
+    }
+    const allReleaseTags = Array.from(allReleaseTagsSet).sort((a, b) => safeSemverCompare(a || '0.0.0', b || '0.0.0'));
+    const datasets = assetNames.map((name, idx) => {
+        const points = assetSeries[name];
+        const byTag = {};
+        for (const p of points) {
+            byTag[p.tagName] = (byTag[p.tagName] || 0) + (p.downloads || 0);
+        }
+        const colorHue = (idx * 53) % 360;
+        return {
+            label: formatAssetLabel(name),
+            data: allReleaseTags.map(tag => byTag[tag] || 0),
+            borderColor: `hsl(${colorHue}, 70%, 45%)`,
+            backgroundColor: `hsla(${colorHue}, 70%, 45%, 0.2)`,
+            borderWidth: 2,
+            fill: false,
+            tension: 0.1
+        };
+    });
     const canvas = new Canvas(1200, 800);
     const chart = new Chart(canvas, {
-        type: 'bar',
-        data: {
-            labels: sortedReleases.map((release) => release.tagName),
-            datasets: [{
-                    label: `${metric.name} Release Downloads`,
-                    data: sortedReleases.map((release) => release.downloads),
-                    backgroundColor: 'rgba(255, 99, 132, 0.8)',
-                    borderColor: 'rgba(255, 99, 132, 1)',
-                    borderWidth: 1,
-                }]
-        },
+        type: 'line',
+        data: { labels: allReleaseTags, datasets },
         options: {
             responsive: true,
             plugins: {
-                title: {
-                    display: true,
-                    text: `${metric.name} - Top Release Downloads`,
-                    font: {
-                        size: 16
-                    }
-                },
-                legend: {
-                    display: true
-                }
+                title: { display: true, text: `${metric.name} - Asset Downloads Across Releases`, font: { size: 16 } },
+                legend: { display: true }
             },
             scales: {
-                x: {
-                    title: {
-                        display: true,
-                        text: 'Release Tag'
-                    }
-                },
-                y: {
-                    title: {
-                        display: true,
-                        text: 'Downloads'
-                    },
-                    beginAtZero: true
-                }
+                x: { title: { display: true, text: 'Release Tag' } },
+                y: { title: { display: true, text: 'Downloads' }, beginAtZero: true }
             }
         }
     });
     const svgBuffer = await canvas.toBuffer('svg', { matte: 'white' });
-    (0,external_fs_.writeFileSync)(svgOutputPath, svgBuffer);
+    writeFileSync(svgOutputPath, svgBuffer);
     chart.destroy();
     return svgOutputPath;
 }
@@ -64471,7 +64700,7 @@ var external_node_fs_ = __nccwpck_require__(3024);
 
 
 // Register all Chart.js controllers
-Chart.register(...registerables);
+chart_Chart.register(...registerables);
 function formatNpmSummary(summary, platformMetrics) {
     let totalDownloads = 0;
     let totalMonthlyDownloads = 0;
@@ -64529,8 +64758,8 @@ async function createDownloadsPerMonthChart(metric, outputPath) {
     const downloadsRange = metric.metrics?.downloadsRange || [];
     const svgOutputPath = `${outputPath}/${metric.name}-new-downloads-by-month.svg`;
     const groupedDownloads = groupByMonth(downloadsRange);
-    const canvas = new Canvas(1000, 800);
-    const chart = new Chart(canvas, {
+    const canvas = new lib_Canvas(1000, 800);
+    const chart = new chart_Chart(canvas, {
         type: 'line',
         data: {
             labels: Object.keys(groupedDownloads),
@@ -64576,8 +64805,8 @@ async function npm_createCumulativeDownloadsChart(metric, outputPath) {
     const downloadsRange = metric.metrics?.downloadsRange || [];
     const svgOutputPath = `${outputPath}/${metric.name}-cumulative-downloads.svg`;
     const groupedDownloads = groupByMonthCumulative(downloadsRange);
-    const canvas = new Canvas(1000, 800);
-    const chart = new Chart(canvas, {
+    const canvas = new lib_Canvas(1000, 800);
+    const chart = new chart_Chart(canvas, {
         type: 'line',
         data: {
             labels: Object.keys(groupedDownloads),
@@ -64644,7 +64873,7 @@ async function addNpmDetails(summary, platformMetrics) {
 
 
 // Register all Chart.js controllers
-Chart.register(...registerables);
+chart_Chart.register(...registerables);
 function formatPowerShellSummary(summary, platformMetrics) {
     let platformDownloadTotal = 0;
     let totalVersions = 0;
@@ -64746,8 +64975,8 @@ async function createCombinedDownloadsChart(metrics, outputPath) {
         year: '2-digit',
         day: 'numeric'
     }));
-    const canvas = new Canvas(1200, 800);
-    const chart = new Chart(canvas, {
+    const canvas = new lib_Canvas(1200, 800);
+    const chart = new chart_Chart(canvas, {
         type: 'line',
         data: {
             labels: labels,
@@ -64824,8 +65053,8 @@ async function createCombinedCumulativeDownloadsChart(metrics, outputPath) {
         runningTotal += downloads;
         data.push(runningTotal);
     }
-    const canvas = new Canvas(1200, 800);
-    const chart = new Chart(canvas, {
+    const canvas = new lib_Canvas(1200, 800);
+    const chart = new chart_Chart(canvas, {
         type: 'line',
         data: {
             labels: labels,
@@ -64883,7 +65112,7 @@ async function createCombinedCumulativeDownloadsChart(metrics, outputPath) {
 
 
 
-Chart.register(...registerables);
+chart_Chart.register(...registerables);
 function formatPypiSummary(summary, platformMetrics) {
     summary += `| Package | Total Downloads | Monthly Downloads | Weekly Downloads | Daily Downloads | Version |\n`;
     summary += `| --- | --- | --- | --- | --- | --- |\n`;
@@ -64976,8 +65205,8 @@ async function createOverallDownloadsChart(metric, outputPath) {
                 tension: 0.1
             }];
     }
-    const canvas = new Canvas(1000, 800);
-    const chart = new Chart(canvas, {
+    const canvas = new lib_Canvas(1000, 800);
+    const chart = new chart_Chart(canvas, {
         type: 'line',
         data: { labels, datasets },
         options: {
@@ -65031,8 +65260,8 @@ async function createPythonMajorChart(metric, outputPath) {
             fill: false,
         }));
     }
-    const canvas = new Canvas(1000, 800);
-    const chart = new Chart(canvas, {
+    const canvas = new lib_Canvas(1000, 800);
+    const chart = new chart_Chart(canvas, {
         type: 'line',
         data: { labels, datasets },
         options: {
@@ -65086,8 +65315,8 @@ async function createPythonMinorChart(metric, outputPath) {
             fill: false,
         }));
     }
-    const canvas = new Canvas(1000, 800);
-    const chart = new Chart(canvas, {
+    const canvas = new lib_Canvas(1000, 800);
+    const chart = new chart_Chart(canvas, {
         type: 'line',
         data: { labels, datasets },
         options: {
@@ -65138,8 +65367,8 @@ async function createInstallerChart(metric, outputPath) {
             fill: false,
         }));
     }
-    const canvas = new Canvas(1000, 800);
-    const chart = new Chart(canvas, {
+    const canvas = new lib_Canvas(1000, 800);
+    const chart = new chart_Chart(canvas, {
         type: 'line',
         data: { labels, datasets },
         options: {
@@ -65190,8 +65419,8 @@ async function createSystemChart(metric, outputPath) {
             fill: false,
         }));
     }
-    const canvas = new Canvas(1000, 800);
-    const chart = new Chart(canvas, {
+    const canvas = new lib_Canvas(1000, 800);
+    const chart = new chart_Chart(canvas, {
         type: 'line',
         data: { labels, datasets },
         options: {
@@ -65277,7 +65506,7 @@ async function addPypiCharts(summary, platformMetrics) {
 
 
 
-Chart.register([
+chart_Chart.register([
     CategoryScale,
     LineController,
     LineElement,
