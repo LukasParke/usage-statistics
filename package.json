@@ -1,6 +1,6 @@
 {
   "name": "usage-statistics",
-  "version": "1.0.11",
+  "version": "1.0.12",
   "type": "module",
   "description": "A comprehensive GitHub Action for tracking download statistics across multiple platforms",
   "repository": {
